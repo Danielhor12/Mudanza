@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Mudanza Exprés - Colaborativo</title>
+  <title>Organizador de Mudanza Colaborativo</title>
   <style>
     :root {
       --bg: #f8fafc;
@@ -155,10 +155,7 @@
       animation: spin 0.8s linear infinite;
     }
 
-    @keyframes spin {
-      from { transform: rotate(0deg); }
-      to { transform: rotate(360deg); }
-    }
+    @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
 
     .btn-primary {
       background: var(--primary);
@@ -461,6 +458,8 @@
 
     let tasks = [];
     let currentFilter = "all";
+    // Registro de tareas modificadas recientemente para evitar que la sincronización las sobreescriba antes de tiempo
+    const pendingModifications = new Map();
 
     function setSyncStatus(isSyncing, customMessage = null) {
       const dot = document.getElementById("sync-dot");
@@ -481,18 +480,38 @@
       }
     }
 
+    async function sendToSheet(payload) {
+      // Se utiliza text/plain para evitar que el navegador envíe preflight OPTIONS que Google Apps Script rechaza
+      return fetch(API_URL, {
+        method: "POST",
+        mode: "no-cors",
+        headers: { "Content-Type": "text/plain;charset=utf-8" },
+        body: JSON.stringify(payload)
+      });
+    }
+
     async function fetchTasks(isManual = false) {
-      if (!API_URL || API_URL.includes("PEGA_AQUI")) {
-        console.warn("Falta configurar la URL de Apps Script.");
-        return;
-      }
+      if (!API_URL || API_URL.includes("PEGA_AQUI")) return;
       
       setSyncStatus(true, isManual ? "Consultando cambios..." : "Actualizando...");
       try {
         const res = await fetch(API_URL);
         const data = await res.json();
         if (Array.isArray(data)) {
-          tasks = data;
+          // Si el usuario modificó una tarea en el último minuto, se respeta la versión modificada
+          const now = Date.now();
+          tasks = data.map(serverTask => {
+            const sid = String(serverTask.id).trim();
+            if (pendingModifications.has(sid)) {
+              const pending = pendingModifications.get(sid);
+              if (now - pending.timestamp < 35000) {
+                return { ...serverTask, ...pending.data };
+              } else {
+                pendingModifications.delete(sid);
+              }
+            }
+            return serverTask;
+          });
           render();
         }
         setSyncStatus(false);
@@ -507,20 +526,17 @@
     }
 
     async function toggleTask(id) {
-      const task = tasks.find(t => String(t.id).trim() === String(id).trim());
+      const sid = String(id).trim();
+      const task = tasks.find(t => String(t.id).trim() === sid);
       if (!task) return;
       
       task.completed = !task.completed;
+      pendingModifications.set(sid, { data: { completed: task.completed }, timestamp: Date.now() });
       render();
 
       setSyncStatus(true, "Guardando cambio...");
       try {
-        await fetch(API_URL, {
-          method: "POST",
-          mode: "no-cors",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ action: "toggle", id: task.id, completed: task.completed })
-        });
+        await sendToSheet({ action: "toggle", id: sid, completed: task.completed });
       } catch (err) {
         console.error("Error al sincronizar:", err);
       } finally {
@@ -529,19 +545,16 @@
     }
 
     async function deleteTask(id) {
+      const sid = String(id).trim();
       if (!confirm("¿Eliminar esta tarea de la hoja?")) return;
 
-      tasks = tasks.filter(t => String(t.id).trim() !== String(id).trim());
+      tasks = tasks.filter(t => String(t.id).trim() !== sid);
+      pendingModifications.delete(sid);
       render();
 
       setSyncStatus(true, "Eliminando tarea...");
       try {
-        await fetch(API_URL, {
-          method: "POST",
-          mode: "no-cors",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ action: "delete", id: id })
-        });
+        await sendToSheet({ action: "delete", id: sid });
       } catch (err) {
         console.error("Error al eliminar:", err);
       } finally {
@@ -563,7 +576,8 @@
     }
 
     function openEditModal(id) {
-      const task = tasks.find(t => String(t.id).trim() === String(id).trim());
+      const sid = String(id).trim();
+      const task = tasks.find(t => String(t.id).trim() === sid);
       if (!task) return;
 
       document.getElementById("modal-heading").innerText = "Editar Tarea";
@@ -594,49 +608,43 @@
       if (!title) return;
 
       if (id) {
-        // EDICIÓN
+        // EDICIÓN CON PROTECCIÓN CONTRA SOBRESCRITURA
         const task = tasks.find(t => String(t.id).trim() === id);
+        const updatedData = { title, day, person, priority, category };
+        
         if (task) {
-          task.title = title;
-          task.day = day;
-          task.person = person;
-          task.priority = priority;
-          task.category = category;
+          Object.assign(task, updatedData);
         }
+
+        // Marcar modificación pendiente
+        pendingModifications.set(id, { data: updatedData, timestamp: Date.now() });
+
         render();
         closeModal();
 
         setSyncStatus(true, "Actualizando en Sheet...");
         try {
-          await fetch(API_URL, {
-            method: "POST",
-            mode: "no-cors",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ action: "edit", id, title, day, person, priority, category })
-          });
-          // Pequeño retardo para dar tiempo a que Google Sheets complete la escritura
-          setTimeout(fetchTasks, 1500);
+          await sendToSheet({ action: "edit", id, title, day, person, priority, category });
+          setTimeout(() => { fetchTasks(); }, 2000);
         } catch (err) {
           console.error("Error al editar:", err);
         } finally {
           setSyncStatus(false);
         }
       } else {
-        // CREACIÓN
+        // CREACIÓN DE NUEVA TAREA
         const tempId = "task_" + Date.now();
-        tasks.push({ id: tempId, title, day, person, priority, category, completed: false });
+        const newTask = { id: tempId, title, day, person, priority, category, completed: false };
+        tasks.push(newTask);
+        pendingModifications.set(tempId, { data: newTask, timestamp: Date.now() });
+
         render();
         closeModal();
 
         setSyncStatus(true, "Guardando en Sheet...");
         try {
-          await fetch(API_URL, {
-            method: "POST",
-            mode: "no-cors",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ action: "add", title, day, person, priority, category })
-          });
-          setTimeout(fetchTasks, 1500);
+          await sendToSheet({ action: "add", title, day, person, priority, category });
+          setTimeout(() => { fetchTasks(); }, 2000);
         } catch (err) {
           console.error("Error al agregar:", err);
         } finally {
@@ -670,7 +678,6 @@
       DAYS.forEach(day => {
         let dayTasks = tasks.filter(t => t.day === day);
 
-        // Filtro de persona: Carlos incluye Carlos y Ambos; Daniel incluye Daniel y Ambos
         if (currentFilter === "Carlos") {
           dayTasks = dayTasks.filter(t => t.person === "Carlos" || t.person === "Ambos");
         } else if (currentFilter === "Daniel") {
@@ -679,13 +686,9 @@
           dayTasks = dayTasks.filter(t => t.person === "Ambos");
         }
 
-        // ORDENAMIENTO DOBLE:
-        // 1. Pendientes primero, completadas al final
-        // 2. Si ambas están pendientes (o completadas), ordenar por Prioridad (Alta -> Media -> Baja)
+        // Ordenamiento: 1° Pendientes arriba, 2° Por Prioridad (Alta -> Media -> Baja)
         dayTasks.sort((a, b) => {
-          if (a.completed !== b.completed) {
-            return a.completed ? 1 : -1;
-          }
+          if (a.completed !== b.completed) return a.completed ? 1 : -1;
           const pA = PRIORITY_ORDER[a.priority] || 2;
           const pB = PRIORITY_ORDER[b.priority] || 2;
           return pA - pB;
