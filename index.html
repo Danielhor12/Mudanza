@@ -421,7 +421,7 @@
             <label for="task-priority">Prioridad</label>
             <select id="task-priority" class="form-select" required>
               <option value="Alta">Alta</option>
-              <option value="Media" selected>Media</option>
+              <option value="Media">Media</option>
               <option value="Baja">Baja</option>
             </select>
           </div>
@@ -434,7 +434,7 @@
               <option value="Trámites">Trámites</option>
               <option value="Limpieza">Limpieza</option>
               <option value="Muebles">Muebles</option>
-              <option value="General" selected>General</option>
+              <option value="General">General</option>
             </select>
           </div>
         </div>
@@ -455,11 +455,25 @@
 
     const DAYS = ["Lunes", "Martes", "Miércoles", "Jueves", "Viernes", "Sábado"];
     const PRIORITY_ORDER = { "Alta": 1, "Media": 2, "Baja": 3 };
+    const LOCAL_STORE_KEY = "moving_custom_overrides_v3";
 
     let tasks = [];
     let currentFilter = "all";
-    // Registro de tareas modificadas recientemente para evitar que la sincronización las sobreescriba antes de tiempo
-    const pendingModifications = new Map();
+
+    // Almacena localmente las preferencias para que NUNCA vuelvan al valor por defecto
+    function getStoredOverrides() {
+      try {
+        return JSON.parse(localStorage.getItem(LOCAL_STORE_KEY)) || {};
+      } catch (e) {
+        return {};
+      }
+    }
+
+    function saveOverride(id, data) {
+      const overrides = getStoredOverrides();
+      overrides[String(id).trim()] = { ...overrides[String(id).trim()], ...data };
+      localStorage.setItem(LOCAL_STORE_KEY, JSON.stringify(overrides));
+    }
 
     function setSyncStatus(isSyncing, customMessage = null) {
       const dot = document.getElementById("sync-dot");
@@ -481,7 +495,6 @@
     }
 
     async function sendToSheet(payload) {
-      // Se utiliza text/plain para evitar que el navegador envíe preflight OPTIONS que Google Apps Script rechaza
       return fetch(API_URL, {
         method: "POST",
         mode: "no-cors",
@@ -498,20 +511,25 @@
         const res = await fetch(API_URL);
         const data = await res.json();
         if (Array.isArray(data)) {
-          // Si el usuario modificó una tarea en el último minuto, se respeta la versión modificada
-          const now = Date.now();
+          const overrides = getStoredOverrides();
+
+          // Fusión inteligente: si el servidor manda "Media" o "General" pero el usuario ya había guardado otra opción, se respeta la del usuario
           tasks = data.map(serverTask => {
             const sid = String(serverTask.id).trim();
-            if (pendingModifications.has(sid)) {
-              const pending = pendingModifications.get(sid);
-              if (now - pending.timestamp < 35000) {
-                return { ...serverTask, ...pending.data };
-              } else {
-                pendingModifications.delete(sid);
-              }
-            }
-            return serverTask;
+            const local = overrides[sid] || {};
+
+            return {
+              ...serverTask,
+              day: local.day || serverTask.day,
+              person: local.person || serverTask.person,
+              title: local.title || serverTask.title,
+              // Si el servidor trae "Media" o "General", pero localmente se configuró otra cosa, se mantiene lo elegido
+              priority: (serverTask.priority && serverTask.priority !== "Media") ? serverTask.priority : (local.priority || serverTask.priority || "Media"),
+              category: (serverTask.category && serverTask.category !== "General") ? serverTask.category : (local.category || serverTask.category || "General"),
+              completed: typeof local.completed === "boolean" ? local.completed : serverTask.completed
+            };
           });
+
           render();
         }
         setSyncStatus(false);
@@ -531,12 +549,12 @@
       if (!task) return;
       
       task.completed = !task.completed;
-      pendingModifications.set(sid, { data: { completed: task.completed }, timestamp: Date.now() });
+      saveOverride(sid, { completed: task.completed });
       render();
 
       setSyncStatus(true, "Guardando cambio...");
       try {
-        await sendToSheet({ action: "toggle", id: sid, completed: task.completed });
+        await sendToSheet({ action: "toggle", id: sid, title: task.title, completed: task.completed });
       } catch (err) {
         console.error("Error al sincronizar:", err);
       } finally {
@@ -548,13 +566,17 @@
       const sid = String(id).trim();
       if (!confirm("¿Eliminar esta tarea de la hoja?")) return;
 
+      const task = tasks.find(t => String(t.id).trim() === sid);
       tasks = tasks.filter(t => String(t.id).trim() !== sid);
-      pendingModifications.delete(sid);
-      render();
+      
+      const overrides = getStoredOverrides();
+      delete overrides[sid];
+      localStorage.setItem(LOCAL_STORE_KEY, JSON.stringify(overrides));
 
+      render();
       setSyncStatus(true, "Eliminando tarea...");
       try {
-        await sendToSheet({ action: "delete", id: sid });
+        await sendToSheet({ action: "delete", id: sid, title: task ? task.title : "" });
       } catch (err) {
         console.error("Error al eliminar:", err);
       } finally {
@@ -608,16 +630,14 @@
       if (!title) return;
 
       if (id) {
-        // EDICIÓN CON PROTECCIÓN CONTRA SOBRESCRITURA
+        // EDICIÓN
         const task = tasks.find(t => String(t.id).trim() === id);
-        const updatedData = { title, day, person, priority, category };
+        const updated = { title, day, person, priority, category };
         
         if (task) {
-          Object.assign(task, updatedData);
+          Object.assign(task, updated);
         }
-
-        // Marcar modificación pendiente
-        pendingModifications.set(id, { data: updatedData, timestamp: Date.now() });
+        saveOverride(id, updated);
 
         render();
         closeModal();
@@ -625,18 +645,18 @@
         setSyncStatus(true, "Actualizando en Sheet...");
         try {
           await sendToSheet({ action: "edit", id, title, day, person, priority, category });
-          setTimeout(() => { fetchTasks(); }, 2000);
+          setTimeout(() => { fetchTasks(); }, 2500);
         } catch (err) {
           console.error("Error al editar:", err);
         } finally {
           setSyncStatus(false);
         }
       } else {
-        // CREACIÓN DE NUEVA TAREA
+        // NUEVA TAREA
         const tempId = "task_" + Date.now();
         const newTask = { id: tempId, title, day, person, priority, category, completed: false };
         tasks.push(newTask);
-        pendingModifications.set(tempId, { data: newTask, timestamp: Date.now() });
+        saveOverride(tempId, newTask);
 
         render();
         closeModal();
@@ -644,7 +664,7 @@
         setSyncStatus(true, "Guardando en Sheet...");
         try {
           await sendToSheet({ action: "add", title, day, person, priority, category });
-          setTimeout(() => { fetchTasks(); }, 2000);
+          setTimeout(() => { fetchTasks(); }, 2500);
         } catch (err) {
           console.error("Error al agregar:", err);
         } finally {
@@ -686,7 +706,7 @@
           dayTasks = dayTasks.filter(t => t.person === "Ambos");
         }
 
-        // Ordenamiento: 1° Pendientes arriba, 2° Por Prioridad (Alta -> Media -> Baja)
+        // 1° Pendientes arriba, 2° Por Prioridad (Alta -> Media -> Baja)
         dayTasks.sort((a, b) => {
           if (a.completed !== b.completed) return a.completed ? 1 : -1;
           const pA = PRIORITY_ORDER[a.priority] || 2;
