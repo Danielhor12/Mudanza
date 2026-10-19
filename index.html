@@ -67,7 +67,7 @@
 
     .dot.syncing {
       background: #f59e0b;
-      animation: pulse 1s infinite alternate;
+      animation: pulse 0.8s infinite alternate;
     }
 
     @keyframes pulse { from { opacity: 0.4; } to { opacity: 1; } }
@@ -119,6 +119,41 @@
 
     .filter-btn.active { background: #0f172a; color: #ffffff; border-color: #0f172a; }
 
+    .header-actions {
+      display: flex;
+      gap: 10px;
+      align-items: center;
+      flex-wrap: wrap;
+    }
+
+    .btn-sync {
+      background: #f8fafc;
+      border: 1px solid var(--border);
+      color: #334155;
+      padding: 8px 14px;
+      border-radius: 6px;
+      font-weight: 600;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 0.88rem;
+      transition: all 0.2s ease;
+    }
+
+    .btn-sync:hover {
+      background: #e2e8f0;
+    }
+
+    .btn-sync.spinning #sync-icon {
+      animation: spin 0.8s linear infinite;
+    }
+
+    @keyframes spin {
+      from { transform: rotate(0deg); }
+      to { transform: rotate(360deg); }
+    }
+
     .btn-primary {
       background: var(--primary);
       color: white;
@@ -127,6 +162,7 @@
       border-radius: 6px;
       font-weight: 600;
       cursor: pointer;
+      font-size: 0.88rem;
     }
 
     .btn-primary:hover { background: #1d4ed8; }
@@ -278,7 +314,7 @@
           <h1>Planificador de Mudanza (Lunes a Sábado)</h1>
           <div class="sync-status">
             <span class="dot live" id="sync-dot"></span>
-            <span id="sync-label">Sincronizado con Hoja de Cálculo</span>
+            <span id="sync-label">Conectado a la Hoja de Cálculo</span>
           </div>
         </div>
         <div class="stats-bar">
@@ -299,7 +335,13 @@
           <button class="filter-btn" data-filter="Carlos" onclick="setFilter('Carlos')">Carlos</button>
           <button class="filter-btn" data-filter="Daniel" onclick="setFilter('Daniel')">Daniel</button>
         </div>
-        <button class="btn-primary" onclick="openCreateModal()">+ Agregar Tarea</button>
+        
+        <div class="header-actions">
+          <button class="btn-sync" id="btn-sync-action" onclick="manualSync()">
+            <span id="sync-icon">🔄</span> Sincronizar
+          </button>
+          <button class="btn-primary" onclick="openCreateModal()">+ Agregar Tarea</button>
+        </div>
       </div>
     </header>
 
@@ -354,41 +396,55 @@
     let tasks = [];
     let currentFilter = "all";
 
-    function setSyncStatus(isSyncing) {
+    function setSyncStatus(isSyncing, customMessage = null) {
       const dot = document.getElementById("sync-dot");
       const label = document.getElementById("sync-label");
+      const syncBtn = document.getElementById("btn-sync-action");
+
       if (isSyncing) {
         dot.className = "dot syncing";
-        label.innerText = "Guardando cambios en el Excel...";
+        label.innerText = customMessage || "Sincronizando con Sheet...";
+        syncBtn.classList.add("spinning");
+        syncBtn.disabled = true;
       } else {
         dot.className = "dot live";
-        label.innerText = "Conectado a la Hoja de Cálculo";
+        const timeStr = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+        label.innerText = customMessage || `Sincronizado (${timeStr})`;
+        syncBtn.classList.remove("spinning");
+        syncBtn.disabled = false;
       }
     }
 
-    async function fetchTasks() {
+    async function fetchTasks(isManual = false) {
       if (!API_URL || API_URL.includes("PEGA_AQUI")) {
         console.warn("Falta configurar la URL de Apps Script.");
         return;
       }
+      
+      setSyncStatus(true, isManual ? "Consultando cambios..." : "Actualizando...");
       try {
         const res = await fetch(API_URL);
         tasks = await res.json();
         render();
+        setSyncStatus(false);
       } catch (err) {
         console.error("Error al obtener tareas de la hoja:", err);
+        setSyncStatus(false, "Error de conexión con Sheet");
       }
+    }
+
+    function manualSync() {
+      fetchTasks(true);
     }
 
     async function toggleTask(id) {
       const task = tasks.find(t => t.id === id);
       if (!task) return;
       
-      // Actualización optimista inmediata en la UI
       task.completed = !task.completed;
       render();
 
-      setSyncStatus(true);
+      setSyncStatus(true, "Guardando cambio...");
       try {
         await fetch(API_URL, {
           method: "POST",
@@ -409,7 +465,7 @@
       tasks = tasks.filter(t => t.id !== id);
       render();
 
-      setSyncStatus(true);
+      setSyncStatus(true, "Eliminando tarea...");
       try {
         await fetch(API_URL, {
           method: "POST",
@@ -437,7 +493,7 @@
       render();
       closeModal();
 
-      setSyncStatus(true);
+      setSyncStatus(true, "Agregando tarea...");
       try {
         await fetch(API_URL, {
           method: "POST",
@@ -445,7 +501,6 @@
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ action: "add", title, day, person })
         });
-        // Refrescar para tener el ID exacto asignado por la hoja
         setTimeout(fetchTasks, 1200);
       } catch (err) {
         console.error("Error al agregar en Excel:", err);
@@ -492,7 +547,6 @@
           dayTasks = dayTasks.filter(t => t.person === currentFilter);
         }
 
-        // Tareas pendientes primero, completadas al final
         dayTasks.sort((a, b) => (a.completed === b.completed ? 0 : a.completed ? 1 : -1));
 
         const dayCol = document.createElement("div");
@@ -541,9 +595,9 @@
       return div.innerHTML;
     }
 
-    // Carga inicial y auto-refresco cada 15 segundos para recibir los cambios de la otra persona
+    // Carga inicial y auto-consulta cada 20 segundos
     fetchTasks();
-    setInterval(fetchTasks, 15000);
+    setInterval(fetchTasks, 20000);
   </script>
 </body>
 </html>
