@@ -141,9 +141,7 @@
       transition: all 0.2s ease;
     }
 
-    .btn-sync:hover {
-      background: #e2e8f0;
-    }
+    .btn-sync:hover { background: #e2e8f0; }
 
     .btn-sync.spinning #sync-icon {
       animation: spin 0.8s linear infinite;
@@ -256,6 +254,11 @@
     .person-carlos { background: var(--carlos-bg); color: var(--carlos); }
     .person-daniel { background: var(--daniel-bg); color: var(--daniel); }
 
+    .item-actions {
+      display: flex;
+      gap: 4px;
+    }
+
     .btn-icon {
       background: transparent;
       border: none;
@@ -264,9 +267,11 @@
       color: var(--text-muted);
       padding: 2px 6px;
       border-radius: 4px;
+      transition: all 0.15s ease;
     }
 
-    .btn-icon:hover { color: var(--danger); background: #fee2e2; }
+    .btn-icon:hover { color: var(--text); background: #f1f5f9; }
+    .btn-icon.delete:hover { color: var(--danger); background: #fee2e2; }
 
     .modal-backdrop {
       position: fixed;
@@ -348,11 +353,12 @@
     <div class="days-grid" id="days-container"></div>
   </div>
 
-  <!-- Modal para Agregar -->
+  <!-- Modal para Agregar / Editar -->
   <div class="modal-backdrop" id="task-modal">
     <div class="modal-box">
-      <h3 class="modal-title">Nueva Tarea</h3>
+      <h3 class="modal-title" id="modal-heading">Nueva Tarea</h3>
       <form id="task-form" onsubmit="handleFormSubmit(event)">
+        <input type="hidden" id="task-id">
         <div class="form-group">
           <label for="task-title">Descripción de la tarea</label>
           <input type="text" id="task-title" class="form-input" required placeholder="Ej. Embalar cosas de la cocina">
@@ -380,7 +386,7 @@
 
         <div class="modal-actions">
           <button type="button" class="btn-secondary" onclick="closeModal()">Cancelar</button>
-          <button type="submit" class="btn-primary">Guardar</button>
+          <button type="submit" class="btn-primary" id="btn-submit-modal">Guardar</button>
         </div>
       </form>
     </div>
@@ -438,7 +444,7 @@
     }
 
     async function toggleTask(id) {
-      const task = tasks.find(t => t.id === id);
+      const task = tasks.find(t => String(t.id) === String(id));
       if (!task) return;
       
       task.completed = !task.completed;
@@ -462,7 +468,7 @@
     async function deleteTask(id) {
       if (!confirm("¿Eliminar esta tarea del Excel?")) return;
 
-      tasks = tasks.filter(t => t.id !== id);
+      tasks = tasks.filter(t => String(t.id) !== String(id));
       render();
 
       setSyncStatus(true, "Eliminando tarea...");
@@ -480,32 +486,89 @@
       }
     }
 
+    function openCreateModal() {
+      document.getElementById("modal-heading").innerText = "Nueva Tarea";
+      document.getElementById("btn-submit-modal").innerText = "Guardar";
+      document.getElementById("task-id").value = "";
+      document.getElementById("task-title").value = "";
+      document.getElementById("task-day").value = "Lunes";
+      document.getElementById("task-person").value = "Carlos";
+      document.getElementById("task-modal").classList.add("open");
+      document.getElementById("task-title").focus();
+    }
+
+    function openEditModal(id) {
+      const task = tasks.find(t => String(t.id) === String(id));
+      if (!task) return;
+
+      document.getElementById("modal-heading").innerText = "Editar Tarea";
+      document.getElementById("btn-submit-modal").innerText = "Actualizar";
+      document.getElementById("task-id").value = task.id;
+      document.getElementById("task-title").value = task.title;
+      document.getElementById("task-day").value = task.day;
+      document.getElementById("task-person").value = task.person;
+      document.getElementById("task-modal").classList.add("open");
+      document.getElementById("task-title").focus();
+    }
+
+    function closeModal() {
+      document.getElementById("task-modal").classList.remove("open");
+    }
+
     async function handleFormSubmit(e) {
       e.preventDefault();
+      const id = document.getElementById("task-id").value;
       const title = document.getElementById("task-title").value.trim();
       const day = document.getElementById("task-day").value;
       const person = document.getElementById("task-person").value;
 
       if (!title) return;
 
-      const tempId = Date.now().toString();
-      tasks.push({ id: tempId, title, day, person, completed: false });
-      render();
-      closeModal();
+      if (id) {
+        // EDICIÓN DE TAREA EXISTENTE
+        const task = tasks.find(t => String(t.id) === String(id));
+        if (task) {
+          task.title = title;
+          task.day = day;
+          task.person = person;
+        }
+        render();
+        closeModal();
 
-      setSyncStatus(true, "Agregando tarea...");
-      try {
-        await fetch(API_URL, {
-          method: "POST",
-          mode: "no-cors",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ action: "add", title, day, person })
-        });
-        setTimeout(fetchTasks, 1200);
-      } catch (err) {
-        console.error("Error al agregar en Excel:", err);
-      } finally {
-        setSyncStatus(false);
+        setSyncStatus(true, "Actualizando en Sheet...");
+        try {
+          await fetch(API_URL, {
+            method: "POST",
+            mode: "no-cors",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ action: "edit", id, title, day, person })
+          });
+        } catch (err) {
+          console.error("Error al editar en Excel:", err);
+        } finally {
+          setSyncStatus(false);
+        }
+      } else {
+        // CREACIÓN DE NUEVA TAREA
+        const tempId = Date.now().toString();
+        tasks.push({ id: tempId, title, day, person, completed: false });
+        render();
+        closeModal();
+
+        setSyncStatus(true, "Agregando tarea...");
+        try {
+          await fetch(API_URL, {
+            method: "POST",
+            mode: "no-cors",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ action: "add", title, day, person })
+          });
+          setTimeout(fetchTasks, 1200);
+        } catch (err) {
+          console.error("Error al agregar en Excel:", err);
+        } finally {
+          setSyncStatus(false);
+        }
       }
     }
 
@@ -515,16 +578,6 @@
         btn.classList.toggle("active", btn.dataset.filter === person);
       });
       render();
-    }
-
-    function openCreateModal() {
-      document.getElementById("task-title").value = "";
-      document.getElementById("task-modal").classList.add("open");
-      document.getElementById("task-title").focus();
-    }
-
-    function closeModal() {
-      document.getElementById("task-modal").classList.remove("open");
     }
 
     function render() {
@@ -547,6 +600,7 @@
           dayTasks = dayTasks.filter(t => t.person === currentFilter);
         }
 
+        // Tareas pendientes arriba, completadas al fondo
         dayTasks.sort((a, b) => (a.completed === b.completed ? 0 : a.completed ? 1 : -1));
 
         const dayCol = document.createElement("div");
@@ -578,7 +632,10 @@
               </div>
               <div class="task-meta">
                 <span class="badge-person person-${task.person.toLowerCase()}">${task.person}</span>
-                <button class="btn-icon" onclick="deleteTask('${task.id}')" title="Eliminar">🗑️</button>
+                <div class="item-actions">
+                  <button class="btn-icon" onclick="openEditModal('${task.id}')" title="Editar tarea">✏️</button>
+                  <button class="btn-icon delete" onclick="deleteTask('${task.id}')" title="Eliminar tarea">🗑️</button>
+                </div>
               </div>
             `;
             list.appendChild(item);
@@ -595,7 +652,7 @@
       return div.innerHTML;
     }
 
-    // Carga inicial y auto-consulta cada 20 segundos
+    // Carga inicial y auto-consulta periódica
     fetchTasks();
     setInterval(fetchTasks, 20000);
   </script>
